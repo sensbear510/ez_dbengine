@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\user\work\ez_dbengine\ffi\cpp\build_win\CMakeFiles\74363bc1e67b48164683e2337dacc4bb\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{7D0CC42C-8907-3279-849B-EE9979071543}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

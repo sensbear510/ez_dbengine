@@ -1,0 +1,15 @@
+/mnt/ez_dbengine/ffi/cs/bin/Release/net8.0/linux-x64/ez_stress_master
+/mnt/ez_dbengine/ffi/cs/bin/Release/net8.0/linux-x64/ez_stress_master.deps.json
+/mnt/ez_dbengine/ffi/cs/bin/Release/net8.0/linux-x64/ez_stress_master.runtimeconfig.json
+/mnt/ez_dbengine/ffi/cs/bin/Release/net8.0/linux-x64/ez_stress_master.dll
+/mnt/ez_dbengine/ffi/cs/bin/Release/net8.0/linux-x64/ez_stress_master.pdb
+/mnt/ez_dbengine/ffi/cs/obj/Release/net8.0/linux-x64/ez_stress_master.GeneratedMSBuildEditorConfig.editorconfig
+/mnt/ez_dbengine/ffi/cs/obj/Release/net8.0/linux-x64/ez_stress_master.AssemblyInfoInputs.cache
+/mnt/ez_dbengine/ffi/cs/obj/Release/net8.0/linux-x64/ez_stress_master.AssemblyInfo.cs
+/mnt/ez_dbengine/ffi/cs/obj/Release/net8.0/linux-x64/ez_stress_master.csproj.CoreCompileInputs.cache
+/mnt/ez_dbengine/ffi/cs/obj/Release/net8.0/linux-x64/ez_stress_master.sourcelink.json
+/mnt/ez_dbengine/ffi/cs/obj/Release/net8.0/linux-x64/ez_stress_master.dll
+/mnt/ez_dbengine/ffi/cs/obj/Release/net8.0/linux-x64/refint/ez_stress_master.dll
+/mnt/ez_dbengine/ffi/cs/obj/Release/net8.0/linux-x64/ez_stress_master.pdb
+/mnt/ez_dbengine/ffi/cs/obj/Release/net8.0/linux-x64/ez_stress_master.genruntimeconfig.cache
+/mnt/ez_dbengine/ffi/cs/obj/Release/net8.0/linux-x64/ref/ez_stress_master.dll

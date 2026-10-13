@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/bear/ez_dbengine/ffi/cpp/build_linux/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,14 @@
+name: ez_stress_app
+description: Stress runner and test harness for ez_dbengine.
+version: 1.0.0
+publish_to: 'none'
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ffi: 2.1.0
+  ez_dbengine:
+    path: ../../ez_dbengine

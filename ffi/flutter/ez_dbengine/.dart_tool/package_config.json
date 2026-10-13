@@ -1,0 +1,22 @@
+{
+  "configVersion": 2,
+  "packages": [
+    {
+      "name": "ffi",
+      "rootUri": "file:///C:/Users/user/AppData/Local/Pub/Cache/hosted/pub.dev/ffi-2.1.0",
+      "packageUri": "lib/",
+      "languageVersion": "3.0"
+    },
+    {
+      "name": "ez_dbengine",
+      "rootUri": "../",
+      "packageUri": "lib/",
+      "languageVersion": "3.0"
+    }
+  ],
+  "generator": "pub",
+  "generatorVersion": "3.13.0-34.0.dev",
+  "flutterRoot": "file:///C:/Users/user/flutter",
+  "flutterVersion": "3.47.0-0.4.pre",
+  "pubCache": "file:///C:/Users/user/AppData/Local/Pub/Cache"
+}

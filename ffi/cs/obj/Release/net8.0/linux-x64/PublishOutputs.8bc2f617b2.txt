@@ -1,0 +1,5 @@
+/home/bear/ez_dbengine/ffi/cs/run_linux/ez_stress_master
+/home/bear/ez_dbengine/ffi/cs/run_linux/ez_stress_master.dll
+/home/bear/ez_dbengine/ffi/cs/run_linux/ez_stress_master.deps.json
+/home/bear/ez_dbengine/ffi/cs/run_linux/ez_stress_master.runtimeconfig.json
+/home/bear/ez_dbengine/ffi/cs/run_linux/ez_stress_master.pdb

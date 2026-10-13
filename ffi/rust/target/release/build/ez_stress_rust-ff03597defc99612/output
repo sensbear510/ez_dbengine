@@ -1,0 +1,12 @@
+cargo:rustc-link-search=native=.
+cargo:rustc-link-search=native=run_win
+cargo:rustc-link-search=native=run_linux
+cargo:rustc-link-search=native=../../build_win/bin/Release
+cargo:rustc-link-search=native=../../build_win/lib/Release
+cargo:rustc-link-search=native=../../build_win/bin
+cargo:rustc-link-search=native=../../build_win/lib
+cargo:rustc-link-search=native=../../build_win
+cargo:rustc-link-search=native=../../build_linux/lib
+cargo:rustc-link-search=native=../../build_linux
+cargo:rustc-link-lib=dylib=ez_dbengine
+cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN
