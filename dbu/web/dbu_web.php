@@ -4,7 +4,7 @@
  * FILE: dbu_web.php - Master Workplace for ezDBUtility (Web Edition)
  * ---------------------------------------------------------------------------------
  * Copyrights (c) 2026 ezLink.io All rights reserved.
- * STAGE 1 Baseline: Aligned with desktop_main_page.dart (C-Core True Operations)
+ * Integrated with in-process WorkAreaRegistry for high-performance schema lookup
  * =================================================================================
  */
 
@@ -53,6 +53,78 @@ if (!$loaded) {
 use EzDB\EzDBEngine;
 use EzDB\Field;
 
+/**
+ * Class WorkAreaRegistry
+ * In-process centralized storage for active WorkAreas, field schema, and tags.
+ */
+class WorkAreaRegistry {
+    private static array $pool = [];
+
+    /**
+     * Store WorkArea metadata for the specified physical file path
+     */
+    public static function set(string $path, int $handle, array $fields, array $tags, int $total, int $delCount): void {
+        $realPath = realpath($path) ?: $path;
+
+        $fieldLens = [];
+        $fieldMap = [];
+        foreach ($fields as $f) {
+            $name = is_object($f) ? $f->name : $f['name'];
+            $len = is_object($f) ? (int)$f->length : (int)$f['len'];
+            $type = is_object($f) ? $f->type : $f['type'];
+            $dec = is_object($f) ? (int)$f->dec : (int)$f['dec'];
+
+            $fieldLens[strtolower($name)] = $len;
+            $fieldMap[] = [
+                'name' => $name,
+                'type' => $type,
+                'len'  => $len,
+                'dec'  => $dec
+            ];
+        }
+
+        $tagMap = [];
+        foreach ($tags as $t) {
+            $tagMap[(int)$t['slot']] = $t['name'];
+            $tagMap[strtolower($t['name'])] = (int)$t['slot'];
+        }
+
+        self::$pool[$realPath] = [
+            'handle'     => $handle,
+            'path'       => $realPath,
+            'fields'     => $fieldMap,
+            'field_lens' => $fieldLens,
+            'tags'       => $tagMap,
+            'total'      => $total,
+            'del_count'  => $delCount
+        ];
+    }
+
+    /**
+     * Retrieve full WorkArea metadata entry
+     */
+    public static function get(string $path): ?array {
+        $realPath = realpath($path) ?: $path;
+        return self::$pool[$realPath] ?? null;
+    }
+
+    /**
+     * Retrieve specific attribute from registry
+     */
+    public static function getAttr(string $path, string $key, mixed $default = null): mixed {
+        $entry = self::get($path);
+        return $entry[$key] ?? $default;
+    }
+
+    /**
+     * Remove entry from registry upon closing table
+     */
+    public static function remove(string $path): void {
+        $realPath = realpath($path) ?: $path;
+        unset(self::$pool[$realPath]);
+    }
+}
+
 // Return standard JSON error response if this is an API request and FFI failed
 if (isset($_GET['api']) && $ffiInitError !== null) {
     header('Content-Type: application/json; charset=utf-8');
@@ -72,7 +144,7 @@ if (isset($_GET['api'])) {
     $api = $_GET['api'];
 
     try {
-        // Retrieve persistent C engine singleton instance (fallback if SDK does not implement getInstance)
+        // Retrieve persistent C engine singleton instance
         static $engine = null;
         if ($engine === null) {
             $engine = method_exists('EzDB\EzDBEngine', 'getInstance') 
@@ -97,11 +169,9 @@ if (isset($_GET['api'])) {
                 while (($file = readdir($dh)) !== false) {
                     if ($file === '.') continue;
 
-                    // Dynamically assemble full path according to platform directory separator
                     $fullPath = rtrim($realDir, '\\/') . $ds . $file;
                     $isDir = is_dir($fullPath);
 
-                    // Retain directories and *.ebf files only, filtering out .edx, .erl, etc.
                     if ($isDir || preg_match('/\.ebf$/i', $file)) {
                         $items[] = [
                             'name'      => $file,
@@ -121,7 +191,6 @@ if (isset($_GET['api'])) {
                 return strcasecmp($a['name'], $b['name']);
             });
 
-            // Prevent escaping backslashes when outputting JSON, include platform info
             echo json_encode([
                 'status'   => 'success',
                 'platform' => PHP_OS_FAMILY,
@@ -139,20 +208,18 @@ if (isset($_GET['api'])) {
                 throw new Exception("File not found: $path");
             }
 
-            // Pass absolute file path directly to prevent chdir security restrictions and path conflicts in web environment
+            chdir(dirname($realPath));
             $handle = $engine->use($realPath);
 
-            // Strict verification: Handle value 0 denotes true file open failure
             if ($handle === 0) {
                 $err = EzDBEngine::getDetailedError(-104);
                 throw new Exception("Unable to mount EBF WorkArea: $path | $err");
             }
 
-            // Inspect underlying warnings (such as missing .edx in same directory)
             $warningMsg = null;
             $lastErr = EzDBEngine::lastError();
             if (!empty($lastErr) && stripos($lastErr, 'warning') !== false) {
-                $warningMsg = $lastErr . " (Notice: Mounted .edx index file must reside in the same directory as the .ebf table)";
+                $warningMsg = $lastErr;
             }
 
             $fields = $engine->getFdt($handle);
@@ -160,14 +227,24 @@ if (isset($_GET['api'])) {
             $delCount = $engine->getDeleteCount($handle);
 
             $tags = [];
-            for ($i = 1; $i <= 8; $i++) {
-                $lastRec = $engine->getLastRec($i, $handle);
-                if ($lastRec > 0) {
-                    $tags[] = [
-                        'slot' => $i,
-                        'name' => ($i === 1 ? 'idx_code' : 'idx_date'),
-                        'expression' => ($i === 1 ? 'code' : 'date')
-                    ];
+            $cTags = EzDBEngine::getFFI()->ez_db_get_tags($handle);
+            for ($i = 0; $i < 8; $i++) {
+                $rawTagName = '';
+                for ($k = 0; $k < 64; $k++) {
+                    if ($cTags[$i]->tag_name[$k] === "\0") break;
+                    $rawTagName .= $cTags[$i]->tag_name[$k];
+                }
+
+                if ($rawTagName !== '') {
+                    $slotNum = $i + 1;
+                    $lastRec = $engine->getLastRec($slotNum, $handle);
+                    if ($lastRec > 0) {
+                        $tags[] = [
+                            'slot'       => $slotNum,
+                            'name'       => $rawTagName,
+                            'expression' => $rawTagName
+                        ];
+                    }
                 }
             }
 
@@ -179,6 +256,9 @@ if (isset($_GET['api'])) {
                     'dec'  => $f->dec
                 ];
             }, $fields);
+
+            // Register complete schema metadata into WorkAreaRegistry
+            WorkAreaRegistry::set($realPath, $handle, $fdtData, $tags, $total, $delCount);
 
             echo json_encode([
                 'status'        => 'success',
@@ -192,69 +272,170 @@ if (isset($_GET['api'])) {
             exit;
         }
 
-        // Native C-Core vector read and EDX sorting via persistent engine and handle
         if ($api === 'fetch_rows') {
             $path = $_POST['path'] ?? '';
             $offset = (int)($_POST['offset'] ?? 0);
             $limit = (int)($_POST['limit'] ?? 200);
             $tagId = (int)($_POST['tag_id'] ?? 0);
 
-            $handle = $engine->use($path);
-            $fields = $engine->getFdt($handle);
-            $total = $engine->getLastRec($tagId, $handle);
+            $realPath = realpath($path);
+            if ($realPath) {
+                chdir(dirname($realPath));
+            }
+            $targetPath = $realPath ?: $path;
+
+            $handle = $engine->use($targetPath);
+
+            // Retrieve field schema from WorkAreaRegistry, with defensive fallback to getFdt
+            $cachedFields = WorkAreaRegistry::getAttr($targetPath, 'fields');
+            if ($cachedFields && is_array($cachedFields)) {
+                $fields = $cachedFields;
+            } else {
+                $rawFdt = $engine->getFdt($handle);
+                $fields = array_map(function(Field $f) {
+                    return ['name' => $f->name, 'len' => $f->length];
+                }, $rawFdt);
+            }
             
-            $engine->goTo($offset + 1, $tagId, $handle);
+            $total = ($tagId === 0) ? $engine->getTotalRecords($handle) : $engine->getLastRec($tagId, $handle);
 
             $rows = [];
-            for ($i = 0; $i < $limit && ($offset + $i) < $total; $i++) {
-                $raw = $engine->getRecord($tagId, $handle);
-                if ($raw === null) break;
+            if ($offset < $total) {
+                $engine->goTo($offset + 1, $tagId, $handle);
 
-                $physicalRowId = $engine->getRecno($tagId, $handle);
-                $isDel = $engine->isDeleted($physicalRowId, $handle);
+                for ($i = 0; $i < $limit && ($offset + $i) < $total; $i++) {
+                    $raw = $engine->getRecord($tagId, $handle);
+                    if ($raw === null) {
+                        break;
+                    }
 
-                $colValues = [];
-                $cur = 0;
-                foreach ($fields as $f) {
-                    $val = substr($raw, $cur, $f->length);
-                    $colValues[$f->name] = trim($val);
-                    $cur += $f->length;
+                    $physicalRowId = $engine->getRecno($tagId, $handle);
+                    $isDel = $engine->isDeleted($physicalRowId, $handle);
+
+                    $colValues = [];
+                    $cur = 0;
+                    foreach ($fields as $f) {
+                        $fLen = is_object($f) ? $f->length : $f['len'];
+                        $fName = is_object($f) ? $f->name : $f['name'];
+                        $val = substr($raw, $cur, $fLen);
+                        $colValues[$fName] = trim($val);
+                        $cur += $fLen;
+                    }
+
+                    $rows[] = [
+                        'track_index' => $offset + $i + 1,
+                        'recno'       => $physicalRowId,
+                        'is_deleted'  => $isDel,
+                        'data'        => $colValues
+                    ];
                 }
-
-                $rows[] = [
-                    'track_index' => $offset + $i + 1,
-                    'recno'       => $physicalRowId,
-                    'is_deleted'  => $isDel,
-                    'data'        => $colValues
-                ];
-
-                if ($engine->skip(1, $tagId, $handle) !== 0) break;
+                echo json_encode(['status' => 'success', 'rows' => $rows, 'total' => $total, 'offset' => $offset]);
+                exit;
             }
 
-            echo json_encode(['status' => 'success', 'rows' => $rows, 'total' => $total, 'offset' => $offset]);
+            echo json_encode([
+                'status' => 'success', 
+                'rows'   => $rows, 
+                'total'  => $total, 
+                'offset' => $offset
+            ]);
             exit;
         }
 
+        // -------------------------------------------------------------
+        // [3] seek_locate API: Tag-Aware Seek & Locate
+        // -------------------------------------------------------------
         if ($api === 'seek_locate') {
+            while (ob_get_level() > 0) {
+                ob_end_clean();
+            }
+            header('Content-Type: application/json; charset=utf-8');
+
             $path = $_POST['path'] ?? '';
             $mode = $_POST['mode'] ?? 'locate';
-            $tagName = $_POST['tag_name'] ?? '';
-            $key = $_POST['key'] ?? '';
-            $fieldName = $_POST['field_name'] ?? '';
+            $tagName = trim($_POST['tag_name'] ?? '');
+            $tagId = (int)($_POST['tag_id'] ?? 0);
+            $key = trim($_POST['key'] ?? '');
+            $fieldName = trim($_POST['field_name'] ?? '');
             $startRec = (int)($_POST['start_rec'] ?? 1);
+            $exactMatch = !empty($_POST['exact_match']);
 
-            $handle = $engine->use($path);
+            $realPath = realpath($path);
+            if ($realPath) {
+                chdir(dirname($realPath));
+            }
+            $targetPath = $realPath ?: $path;
+            $handle = $engine->use($targetPath);
 
-            if ($mode === 'seek') {
-                $found = $engine->seekByTag($tagName, $key, $handle);
-                $foundRec = $found ? $engine->getRecno(0, $handle) : 0;
-                echo json_encode(['status' => 'success', 'found' => $found, 'recno' => $foundRec]);
-                exit;
-            } else {
-                $engine->goTo($startRec, 0, $handle);
-                $found = $engine->locate($fieldName, $key, $handle);
-                $foundRec = ($found === 0) ? $engine->getRecno(0, $handle) : 0;
-                echo json_encode(['status' => 'success', 'found' => ($found === 0), 'recno' => $foundRec]);
+            try {
+                if ($mode === 'seek') {
+                    // 1. Resolve key padding using cached field length
+                    $fieldLens = WorkAreaRegistry::getAttr($targetPath, 'field_lens', []);
+                    $cleanTag = strtolower(str_replace('idx_', '', $tagName));
+                    $targetLen = $fieldLens[$cleanTag] ?? ($fieldLens[strtolower($tagName)] ?? 0);
+
+                    if ($targetLen === 0) {
+                        $fields = $engine->getFdt($handle);
+                        foreach ($fields as $f) {
+                            if (strtolower($f->name) === $cleanTag || strtolower($f->name) === strtolower($tagName)) {
+                                $targetLen = (int)$f->length;
+                                break;
+                            }
+                        }
+                    }
+
+                    $paddedKey = ($targetLen > strlen($key)) ? str_pad($key, $targetLen, ' ', STR_PAD_RIGHT) : $key;
+
+                    // 2. Perform native C-Core binary seek
+                    $found = $engine->seekByTag($tagName, $paddedKey, $handle);
+                    if (!$found && $paddedKey !== $key) {
+                        $found = $engine->seekByTag($tagName, $key, $handle);
+                    }
+
+                    // 3. Now ez_db_recno directly returns the 1-based node sequence cursor of the tag!
+                    $trackCursor = $found ? $engine->getRecno($tagId, $handle, $tagName) : 0;
+                    $isEof = $engine->isEof($tagId, $handle, $tagName);
+
+                    echo json_encode([
+                        'status' => 'success', 
+                        'found'  => $found, 
+                        'recno'  => $trackCursor, // 1-based visual index on current tag track
+                        'eof'    => $isEof
+                    ]);
+                    exit;
+                } else {
+                    // Locate mode (Natural track)
+                    $total = $engine->getTotalRecords($handle);
+                    if ($startRec > $total) {
+                        echo json_encode([
+                            'status' => 'success', 
+                            'found'  => false, 
+                            'recno'  => 0, 
+                            'eof'    => true
+                        ]);
+                        exit;
+                    }
+
+                    $engine->goTo($startRec, 0, $handle);
+                    $status = $engine->locate($fieldName, $key, $handle, !$exactMatch);
+
+                    $isFound = ($status === 0);
+                    $foundRec = $isFound ? $engine->getRecno(0, $handle) : 0;
+                    $isEof = ($status !== 0) || $engine->isEof(0, $handle);
+
+                    echo json_encode([
+                        'status' => 'success', 
+                        'found'  => $isFound, 
+                        'recno'  => $foundRec, 
+                        'eof'    => $isEof
+                    ]);
+                    exit;
+                }
+            } catch (\Throwable $e) {
+                echo json_encode([
+                    'status'  => 'error',
+                    'message' => 'PHP Exception: ' . $e->getMessage()
+                ]);
                 exit;
             }
         }
@@ -523,7 +704,7 @@ if (isset($_GET['api'])) {
         .slot-card.active .slot-card-header { color: var(--accent-amber); }
         .slot-card-expr { font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         
-        /* 4. Smart Seek Bar (48px) - Full-width input, action buttons aligned right with 10px spacing */
+        /* 4. Smart Seek Bar (48px) */
         .smart-seek-bar {
             height: 48px; background-color: var(--card-color); display: flex;
             align-items: center; padding: 6px 10px; gap: 10px; border-bottom: 1px solid var(--border-color);
@@ -542,7 +723,7 @@ if (isset($_GET['api'])) {
         }
         .btn-seek.seek-mode { background: var(--accent-amber) !important; color: #17181c !important; }
 
-        /* 5. Virtualized DataGrid Architecture (Virtual Spacer + Sliding Window) */
+        /* 5. Virtualized DataGrid Workplace (Aligned with desktop_main_page) */
         .datagrid-container {
             flex: 1; overflow-y: scroll; overflow-x: auto; position: relative; background: var(--bg-color); outline: none;
         }
@@ -580,7 +761,7 @@ if (isset($_GET['api'])) {
             align-items: center; justify-content: center; gap: 14px; color: #4e5058;
         }
 
-        /* 6. Bottom TOOLBOX Bar (36px) - Always displayed above the status bar */
+        /* 6. Bottom TOOLBOX Bar (36px) */
         .toolbox-bar {
             height: 36px; background-color: #1a1b1f; display: flex;
             align-items: center; padding: 0 14px; border-top: 1px solid var(--border-color);
@@ -606,8 +787,7 @@ if (isset($_GET['api'])) {
         .st-badge { font-weight: 700; color: #555; }
         .st-badge.active { color: var(--accent-amber); }
 
-        /* 8. Collapsible Toolchain Drawer (Height expanded to calc(100vh - 160px)) */
-        /* 8. Collapsible Toolchain Drawer (Ensured z-index: 2000 to overlay above DataGrid) */
+        /* 8. Collapsible Toolchain Drawer */
         .toolchain-drawer {
             position: absolute; top: 156px; bottom: 24px; left: 0; right: 0;
             background: #202227; border-top: 2px solid var(--accent-amber);
@@ -640,179 +820,57 @@ if (isset($_GET['api'])) {
         .explorer-row:hover { background: rgba(255,255,255,0.05); }
         .explorer-row.selected { background: rgba(229, 155, 36, 0.2); color: #fff; font-weight: 700; }
 
-        /* =============================================================
-           RWD: Tablet (Pad: <= 1024px) & Mobile (Phone: <= 600px) Adaptation Rules
-        ============================================================= */
+        /* RWD */
         @media screen and (max-width: 1024px) {
-            .toolchain-drawer {
-                top: 80px; /* Reserve expanded working height on tablet form factors */
-            }
+            .toolchain-drawer { top: 80px; }
         }
 
         @media screen and (max-width: 600px) {
-            /* 1. Header and top menu stacking compression */
-            .header-shell {
-                height: auto;
-                flex-direction: column;
-                align-items: stretch;
-                padding: 8px 10px;
-                gap: 8px;
-            }
-            .ebf-anchor-card {
-                width: 100%;
-                height: 48px;
-            }
-            .slot-ribbon {
-                width: 100%;
-                height: 54px;
-            }
-            .slot-card {
-                width: 110px;
-                height: 48px;
-                padding: 4px 6px;
-            }
-
-            /* 2. Seek Bar auto-wrap */
-            .smart-seek-bar {
-                height: auto;
-                flex-wrap: wrap;
-                padding: 8px 10px;
-            }
-            .seek-input {
-                max-width: 100%;
-            }
-
-            /* 3. Compact main DataGrid frozen columns (Aligned with Flutter: 72px) */
+            .header-shell { height: auto; flex-direction: column; align-items: stretch; padding: 8px 10px; gap: 8px; }
+            .ebf-anchor-card { width: 100%; height: 48px; }
+            .slot-ribbon { width: 100%; height: 54px; }
+            .slot-card { width: 110px; height: 48px; padding: 4px 6px; }
+            .smart-seek-bar { height: auto; flex-wrap: wrap; padding: 8px 10px; }
+            .seek-input { max-width: 100%; }
             .frozen-act { width: 44px; }
             .frozen-num { width: 38px; left: 44px; }
             .frozen-zap { left: 82px; }
-
-            /* 4. Fullscreen drawer view on mobile devices */
-            .toolchain-drawer {
-                top: 0;
-                bottom: 0;
-                border-top: none;
-                z-index: 3000;
-            }
-            .drawer-body {
-                flex-direction: column;
-                padding: 8px;
-                gap: 10px;
-                overflow-y: auto;
-            }
-
-            /* 5. Fullscreen modal adaptation for file explorer */
-            .modal-card {
-                width: 95vw !important;
-                height: 85vh !important;
-            }
+            .toolchain-drawer { top: 0; bottom: 0; border-top: none; z-index: 3000; }
+            .drawer-body { flex-direction: column; padding: 8px; gap: 10px; overflow-y: auto; }
+            .modal-card { width: 95vw !important; height: 85vh !important; }
         }
 
-        /* =========================================================================
-        Craftsman Toast / Slide Notification Panel
-        ========================================================================= */
+        /* Toast Panel */
         .toast-container {
-            position: fixed;
-            top: 48px;
-            right: 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            z-index: 100000;
-            pointer-events: none;
+            position: fixed; top: 48px; right: 20px; display: flex; flex-direction: column;
+            gap: 10px; z-index: 100000; pointer-events: none;
         }
-
         .toast-panel {
-            min-width: 340px;
-            max-width: 480px;
-            background: #1e2025;
-            border-radius: 6px;
-            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.75);
-            padding: 12px 16px;
-            display: flex;
-            align-items: flex-start;
-            gap: 12px;
-            pointer-events: auto;
-            transform: translateX(120%);
-            opacity: 0;
-            transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
-            border-left: 4px solid var(--accent-amber);
-            border-top: 1px solid rgba(255, 255, 255, 0.08);
-            border-right: 1px solid rgba(255, 255, 255, 0.08);
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            min-width: 340px; max-width: 480px; background: #1e2025; border-radius: 6px;
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.75); padding: 12px 16px; display: flex;
+            align-items: flex-start; gap: 12px; pointer-events: auto; transform: translateX(120%);
+            opacity: 0; transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
+            border-left: 4px solid var(--accent-amber); border-top: 1px solid rgba(255, 255, 255, 0.08);
+            border-right: 1px solid rgba(255, 255, 255, 0.08); border-bottom: 1px solid rgba(255, 255, 255, 0.08);
         }
-
-        .toast-panel.show {
-            transform: translateX(0);
-            opacity: 1;
-        }
-
-        .toast-panel.warning {
-            border-left-color: var(--accent-amber);
-        }
-
-        .toast-panel.error {
-            border-left-color: var(--accent-red);
-        }
-
-        .toast-panel.info {
-            border-left-color: #3498db;
-        }
-
-        .toast-icon {
-            font-size: 18px;
-            line-height: 1.2;
-        }
-
-        .toast-content {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-        }
-
-        .toast-title {
-            font-size: 12px;
-            font-weight: 700;
-            color: #fff;
-            letter-spacing: 0.5px;
-        }
-
-        .toast-panel.warning .toast-title {
-            color: var(--accent-amber);
-        }
-
-        .toast-panel.error .toast-title {
-            color: var(--accent-red);
-        }
-
-        .toast-message {
-            font-size: 11px;
-            color: #bbb;
-            line-height: 1.5;
-            word-break: break-all;
-            font-family: var(--font-ui);
-        }
-
-        .toast-close {
-            cursor: pointer;
-            color: #777;
-            font-size: 14px;
-            line-height: 1;
-            padding: 2px;
-        }
-
-        .toast-close:hover {
-            color: #fff;
-        }
+        .toast-panel.show { transform: translateX(0); opacity: 1; }
+        .toast-panel.warning { border-left-color: var(--accent-amber); }
+        .toast-panel.error { border-left-color: var(--accent-red); }
+        .toast-panel.info { border-left-color: #3498db; }
+        .toast-icon { font-size: 18px; line-height: 1.2; }
+        .toast-content { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+        .toast-title { font-size: 12px; font-weight: 700; color: #fff; letter-spacing: 0.5px; }
+        .toast-panel.warning .toast-title { color: var(--accent-amber); }
+        .toast-panel.error .toast-title { color: var(--accent-red); }
+        .toast-message { font-size: 11px; color: #bbb; line-height: 1.5; word-break: break-all; font-family: var(--font-ui); }
+        .toast-close { cursor: pointer; color: #777; font-size: 14px; line-height: 1; padding: 2px; }
+        .toast-close:hover { color: #fff; }
     </style>
 </head>
 <body>
 
-    <!-- Global Slide Notification Container -->
     <div class="toast-container" id="toastContainer"></div>
 
-    <!-- FFI Crash Notification Bar (Top Red Alert) -->
     <div id="ffiCrashBar" style="<?php echo $ffiInitError ? 'display:flex;' : 'display:none;'; ?> position:fixed; top:0; left:0; right:0; height:40px; background:#b71c1c; color:#fff; z-index:99999; align-items:center; padding:0 16px; font-size:12px; font-weight:700; box-shadow:0 4px 16px rgba(0,0,0,0.8); gap:12px; border-bottom:1px solid #ff5252;">
         <span style="font-size:16px;">🚨</span>
         <span style="letter-spacing:0.5px;">[C-CORE FFI FAILURE]:</span>
@@ -822,7 +880,6 @@ if (isset($_GET['api'])) {
         <button onclick="location.reload()" style="background:#fff; color:#b71c1c; border:none; padding:4px 12px; font-size:11px; font-weight:800; border-radius:4px; cursor:pointer;">Press F5 to Reload</button>
     </div>
 
-    <!-- Workplace Lockdown Overlay -->
     <div id="ffiLockdownOverlay" style="<?php echo $ffiInitError ? 'display:flex;' : 'display:none;'; ?> position:fixed; top:40px; left:0; right:0; bottom:0; background:rgba(10, 11, 14, 0.88); backdrop-filter:blur(6px); z-index:99998; flex-direction:column; align-items:center; justify-content:center; gap:16px;">
         <div style="font-size:54px; opacity:0.6;">🔒</div>
         <div style="font-size:16px; font-weight:800; color:#ff5252; letter-spacing:0.5px;">WorkArea Locked Down</div>
@@ -837,7 +894,6 @@ if (isset($_GET['api'])) {
     <div class="top-menubar">
         <div class="menu-title-logo"><span style="color:var(--accent-amber);">🪙</span> ezDBUtility</div>
         
-        <!-- File Menu -->
         <div class="dropdown-menu">
             <button class="menu-btn">File</button>
             <div class="dropdown-content">
@@ -854,25 +910,18 @@ if (isset($_GET['api'])) {
             </div>
         </div>
 
-        <!-- Edit Menu -->
         <div class="dropdown-menu">
             <button class="menu-btn">Edit</button>
             <div class="dropdown-content">
                 <div class="dropdown-item" onclick="activateLocate()"><span>Find Keyword</span><span class="item-key">Ctrl+F</span></div>
                 <div class="dropdown-item" onclick="openModal('#goToRowModal')"><span>Go To Row</span><span class="item-key">Ctrl+G</span></div>
                 <div class="dropdown-divider"></div>
-                
-                <!-- Dynamic EDX Tag 1 ~ 8 Slot Container -->
-                <div id="menuIndexSlotContainer">
-                    <!-- Dynamically populated with active tab EDX slots 1-8 via updateIndexSlotMenu() -->
-                </div>
-                
+                <div id="menuIndexSlotContainer"></div>
                 <div class="dropdown-divider"></div>
                 <div class="dropdown-item" onclick="toggleDeleteActive()"><span>Delete Toggle</span><span class="item-key">Delete</span></div>
             </div>
         </div>
 
-        <!-- Tools Menu -->
         <div class="dropdown-menu">
             <button class="menu-btn">Tools</button>
             <div class="dropdown-content">
@@ -908,7 +957,7 @@ if (isset($_GET['api'])) {
         <button class="btn-seek" id="btnSeek" onclick="executeSeek()">➔ Locate (F3)</button>
     </div>
 
-    <!-- 5. Virtualized DataGrid Workplace (Aligned with desktop_main_page) -->
+    <!-- 5. Virtualized DataGrid Workplace -->
     <div class="datagrid-container" id="gridContainer" tabindex="0" onscroll="onGridScroll()">
         <div class="empty-placeholder" id="emptyPlaceholder">
             <div style="font-size: 48px; opacity: 0.3;">📂</div>
@@ -1007,16 +1056,9 @@ if (isset($_GET['api'])) {
         </div>
     </div>
 
-    <!-- JavaScript Driver Core (Chunk Loading, Bidirectional Preload, Memory Guard Engine) -->
+    <!-- JavaScript Driver Core -->
     <script>
     
-    /**
-     * Show Craftsman Slide Notification panel
-     * @param {string} title Toast title
-     * @param {string} message Detailed message body
-     * @param {'info' | 'warning' | 'error'} type Toast type
-     * @param {number} duration Display duration in milliseconds (default 4500ms; 0 to disable auto-dismiss)
-     */
     function showToast(title, message, type = 'info', duration = 4500) {
         const container = document.getElementById('toastContainer');
         if (!container) return;
@@ -1040,7 +1082,6 @@ if (isset($_GET['api'])) {
 
         container.appendChild(panel);
 
-        // Trigger entrance slide animation
         requestAnimationFrame(() => {
             panel.classList.add('show');
         });
@@ -1052,39 +1093,45 @@ if (isset($_GET['api'])) {
             }, duration);
         }
     }
-
+    
     function postApi(action, data, cb) {
         const fd = new FormData();
         for (let k in data) fd.append(k, data[k]);
         fetch('?api=' + action, { method: 'POST', body: fd })
-            .then(r => r.json())
+            .then(async r => {
+                const text = await r.text();
+                try {
+                    return JSON.parse(text);
+                } catch (e) {
+                    console.error('[API Server Output Error]:', text);
+                    throw e;
+                }
+            })
             .then(cb)
             .catch(err => console.error('API Error:', err));
     }
 
     // -------------------------------------------------------------
-    // Global Workplace & Virtualized Chunk Buffer State (Aligned with desktop_main_page)
+    // Global Workplace & Virtualized Chunk Buffer State
     // -------------------------------------------------------------
-    const kRowHeight = 36.0;         // Fixed row height: 36px
-    const kChunkSize = 200;          // Asynchronously fetch slices of 200 rows
-    const kMaxCacheChunks = 10;      // Memory leak guard: cache up to 10 chunks (2,000 rows)
+    const kRowHeight = 36.0;
+    const kChunkSize = 200;
+    const kMaxCacheChunks = 10;
 
-    // FFI Core status guard flag
     const isFfiAvailable = <?php echo ($ffiInitError === null) ? 'true' : 'false'; ?>;
 
     let openedTabs = [];
     let currentPath = '';
     let currentFields = [];
     let currentTags = [];
-    let currentTagId = 0;           // 0: Natural, 1~8: EDX Tag Slot
+    let currentTagId = 0;
     let totalRecords = 0;
 
-    let selectedRowIdx = 0;         // Currently selected row index (0-based)
+    let selectedRowIdx = 0;
     let selectedColIdx = 0;
     let activeTool = null;
     let relJoinMode = 0;
 
-    // Main DataGrid chunk cache data structure: Map<rowIndex, rowData>
     let mapRowCache = new Map();
     let setLoadingChunks = new Set();
 
@@ -1109,7 +1156,6 @@ if (isset($_GET['api'])) {
                 if (!openedTabs.includes(path)) openedTabs.push(path);
                 renderTabs();
 
-                // Expand workplace components and unlock menu action restrictions
                 document.getElementById('tabBar').style.display = 'flex';
                 document.getElementById('toolboxBar').style.display = 'flex';
                 document.getElementById('emptyPlaceholder').style.display = 'none';
@@ -1136,7 +1182,6 @@ if (isset($_GET['api'])) {
                 initVirtualScroller();
                 document.getElementById('gridContainer').focus();
 
-                // Display non-blocking index mounting notification via slide panel
                 if (res.warning) {
                     showToast('Index Mount Notice', res.warning, 'warning', 6000);
                 }
@@ -1168,7 +1213,6 @@ if (isset($_GET['api'])) {
             if (currentPath) {
                 openEbf(currentPath);
             } else {
-                // Revert to initial view layout
                 document.getElementById('tabBar').style.display = 'none';
                 document.getElementById('toolboxBar').style.display = 'none';
                 document.getElementById('emptyPlaceholder').style.display = 'flex';
@@ -1191,39 +1235,53 @@ if (isset($_GET['api'])) {
     function closeCurrentTab() { if (currentPath) closeTab(currentPath); }
 
     // =========================================================================
-    // 2. EDX 8-Slot Carousel & Index Order Switching
+    // 2. EDX Active Slots Ribbon & Index Order Switching
     // =========================================================================
     function renderSlotRibbon(tags) {
         const ribbon = document.getElementById('slotRibbon');
         ribbon.innerHTML = '';
 
+        // 1. Natural Physical Track (Always Present)
         const natCard = document.createElement('div');
-        natCard.className = `slot-card ${currentTagId===0?'active':''}`;
+        natCard.className = `slot-card ${currentTagId === 0 ? 'active' : ''}`;
         natCard.onclick = () => switchSlot(0);
         natCard.innerHTML = `<div class="slot-card-header"><span>Natural</span><span>★</span></div><div class="slot-card-expr">Physical Track</div>`;
         ribbon.appendChild(natCard);
 
-        for (let i = 1; i <= 8; i++) {
-            const tg = tags.find(t => t.slot === i);
-            const name = tg ? tg.name : `idx_tag${i}`;
-            const expr = tg ? tg.expression : `key_${i}`;
-            const card = document.createElement('div');
-            card.className = `slot-card ${currentTagId===i?'active':''}`;
-            card.onclick = () => switchSlot(i);
-            card.innerHTML = `
-                <div class="slot-card-header"><span>Alt+${i}</span><span>🔑</span></div>
-                <div class="slot-card-expr">${name} (${expr})</div>
-            `;
-            ribbon.appendChild(card);
+        // 2. Render ONLY Active / Mounted Tags
+        if (tags && tags.length > 0) {
+            tags.forEach(tg => {
+                const slotNum = tg.slot;
+                const card = document.createElement('div');
+                card.className = `slot-card ${currentTagId === slotNum ? 'active' : ''}`;
+                card.onclick = () => switchSlot(slotNum);
+                card.innerHTML = `
+                    <div class="slot-card-header"><span>Alt+${slotNum}</span><span>🔑</span></div>
+                    <div class="slot-card-expr">${tg.name} (${tg.expression})</div>
+                `;
+                ribbon.appendChild(card);
+            });
         }
     }
 
     function switchSlot(slot) {
+        // Guard: Prevent switching to non-existent tag slots
+        if (slot !== 0) {
+            const isTagAvailable = currentTags.some(t => t.slot === slot);
+            if (!isTagAvailable) return;
+        }
+
         if (slot === currentTagId && slot !== 0) {
-            slot = 0;
+            slot = 0; // Toggle back to Natural
         }
         currentTagId = slot;
-        document.querySelectorAll('.slot-card').forEach((el, idx) => el.classList.toggle('active', idx === slot));
+
+        // Update active card styling
+        document.querySelectorAll('.slot-card').forEach(el => {
+            const isMatch = (slot === 0 && el.innerText.includes('Natural')) ||
+                            el.innerText.includes(`Alt+${slot}`);
+            el.classList.toggle('active', isMatch);
+        });
 
         const modeText = (slot === 0) ? 'Locate' : `Seek [${slot}]`;
         document.getElementById('stMode').innerText = 'MODE: ' + modeText;
@@ -1248,7 +1306,7 @@ if (isset($_GET['api'])) {
     }
 
     // =========================================================================
-    // 3. Virtualized DataGrid Engine (Virtual Spacer + Sliding Window + Bidirectional Preload)
+    // 3. Virtualized DataGrid Engine
     // =========================================================================
     function renderTableHeaders(fields) {
         let html = `<tr>
@@ -1256,9 +1314,16 @@ if (isset($_GET['api'])) {
             <th class="frozen-num">#</th>
             <th class="frozen-zap">*</th>
         `;
-        fields.forEach(f => { html += `<th>${f.name}</th>`; });
+        fields.forEach(f => {
+            const fName = isObject(f) ? f.name : f;
+            html += `<th>${fName}</th>`;
+        });
         html += '</tr>';
         document.getElementById('tableHeader').innerHTML = html;
+    }
+
+    function isObject(val) {
+        return val !== null && typeof val === 'object';
     }
 
     function initVirtualScroller() {
@@ -1285,7 +1350,6 @@ if (isset($_GET['api'])) {
         startIdx = Math.max(0, startIdx);
         endIdx = Math.min(totalRecords - 1, endIdx);
 
-        // Bidirectional Preload Pipeline: Keep active and neighboring slices ready
         ensureRowBuffered(startIdx);
         ensureRowBuffered(endIdx);
         triggerDirectionalPreload(startIdx, endIdx);
@@ -1324,9 +1388,10 @@ if (isset($_GET['api'])) {
                 `;
 
                 currentFields.forEach((f, colIdx) => {
+                    const fName = isObject(f) ? f.name : f;
                     const isFocused = (i === selectedRowIdx && colIdx === selectedColIdx);
                     const focusedClass = isFocused ? 'cell-focused' : '';
-                    colsHtml += `<td class="${focusedClass}" onclick="selectCell(this, ${i}, ${colIdx})" ondblclick="editCell(this)">${rowData.data[f.name] || ''}</td>`;
+                    colsHtml += `<td class="${focusedClass}" onclick="selectCell(this, ${i}, ${colIdx})" ondblclick="editCell(this)">${rowData.data[fName] || ''}</td>`;
                 });
 
                 tr.innerHTML = colsHtml;
@@ -1352,14 +1417,11 @@ if (isset($_GET['api'])) {
         }
     }
 
-    // Bidirectional Preload Pipeline (Lookahead / Lookback)
     function triggerDirectionalPreload(startIdx, endIdx) {
         const currentChunk = Math.floor(startIdx / kChunkSize);
-        // Lookahead preload
         if ((currentChunk + 1) * kChunkSize < totalRecords) {
             ensureChunkBuffered(currentChunk + 1);
         }
-        // Lookback preload
         if (currentChunk > 0) {
             ensureChunkBuffered(currentChunk - 1);
         }
@@ -1372,12 +1434,10 @@ if (isset($_GET['api'])) {
         ensureChunkBuffered(chunkId);
     }
 
-    // Core Chunk Asynchronous Fetching & Sliding Window Eviction Guard
     function ensureChunkBuffered(chunkId) {
         if (chunkId < 0 || chunkId * kChunkSize >= totalRecords) return;
         if (setLoadingChunks.has(chunkId)) return;
 
-        // Check if first record of chunk already exists
         const sampleOffset = chunkId * kChunkSize;
         if (mapRowCache.has(sampleOffset)) return;
 
@@ -1390,7 +1450,6 @@ if (isset($_GET['api'])) {
         }, function(res) {
             setLoadingChunks.delete(chunkId);
             if (res.status === 'success') {
-                // Memory guard: trigger eviction if total cached chunks exceed 10 (keep nearest chunks)
                 if (mapRowCache.size >= kChunkSize * kMaxCacheChunks) {
                     pruneDistantChunks(chunkId);
                 }
@@ -1404,7 +1463,6 @@ if (isset($_GET['api'])) {
         });
     }
 
-    // Evict chunks furthest from currently visible viewport
     function pruneDistantChunks(activeChunkId) {
         const chunkKeys = new Set();
         for (let idx of mapRowCache.keys()) {
@@ -1482,7 +1540,10 @@ if (isset($_GET['api'])) {
             if (res.status === 'success') {
                 const rowData = mapRowCache.get(idx);
                 if (rowData) {
-                    currentFields.forEach((f, i) => rowData.data[f.name] = vals[i]);
+                    currentFields.forEach((f, i) => {
+                        const fName = isObject(f) ? f.name : f;
+                        rowData.data[fName] = vals[i];
+                    });
                 }
                 tr.style.background = 'rgba(46, 204, 113, 0.3)';
                 setTimeout(() => tr.style.background = '', 400);
@@ -1517,49 +1578,97 @@ if (isset($_GET['api'])) {
     function saveAllTabs() { alert('All Tabs Committed.'); }
 
     // =========================================================================
-    // 4. Smart Seek / Locate Execution Logic (Aligned with Dart C-Core)
+    // 4. Smart Seek / Locate Execution Logic
     // =========================================================================
     function activateLocate() { document.getElementById('seekInput').focus(); }
 
     function executeSeek() {
-        const keyword = document.getElementById('seekInput').value.trim();
+        if (!currentPath) return;
+        const input = document.getElementById('seekInput');
+        const keyword = input.value.trim();
         if (!keyword) return;
 
+        // 1. Natural Track: Execute Locate mode
         if (currentTagId === 0) {
-            const colName = currentFields[selectedColIdx] ? currentFields[selectedColIdx].name : (currentFields[0]?.name || '');
+            const fName = (currentFields.length > 0 && selectedColIdx < currentFields.length)
+                ? (isObject(currentFields[selectedColIdx]) ? currentFields[selectedColIdx].name : currentFields[selectedColIdx])
+                : (isObject(currentFields[0]) ? currentFields[0].name : currentFields[0]);
+
             postApi('seek_locate', {
                 path: currentPath,
                 mode: 'locate',
-                field_name: colName,
+                field_name: fName,
                 key: keyword,
-                start_rec: selectedRowIdx + 1
+                start_rec: selectedRowIdx + 2 // Start scanning from subsequent record
             }, function(res) {
-                if (res.status === 'success' && res.found) {
-                    const targetIdx = res.recno - 1;
-                    selectRowIndex(targetIdx);
-                    ensureRowVisible(targetIdx);
+                if (res && res.status === 'success') {
+                    if (res.found && res.recno > 0) {
+                        document.getElementById('stEof').classList.remove('active');
+                        jumpToTargetRow(res.recno - 1);
+                    } else {
+                        document.getElementById('stEof').classList.add('active');
+                        showToast('Locate EOF', `Locate reached EOF for [${keyword}] on Field [${fName}].`, 'warning');
+                    }
                 } else {
-                    alert(`Locate Not Found: [${keyword}] (Field: ${colName})`);
+                    showToast('Search Error', (res && res.message) ? res.message : 'Unknown server error', 'error');
                 }
             });
-        } else {
-            const tg = currentTags.find(t => t.slot === currentTagId);
-            const tagName = tg ? tg.name : 'idx_code';
-            postApi('seek_locate', {
-                path: currentPath,
-                mode: 'seek',
-                tag_name: tagName,
-                key: keyword
-            }, function(res) {
-                if (res.status === 'success' && res.found) {
-                    const targetIdx = res.recno - 1;
-                    selectRowIndex(targetIdx);
-                    ensureRowVisible(targetIdx);
-                } else {
-                    alert(`Seek Not Found: [${keyword}] (Tag: ${tagName})`);
-                }
-            });
+            return;
         }
+
+        // 2. EDX Track (Alt+1 ~ Alt+8): Execute Seek mode
+        const activeTag = currentTags.find(t => t.slot === currentTagId);
+        if (!activeTag) {
+            showToast('No Active Tag', `Tag slot [${currentTagId}] is empty or unattached.`, 'warning');
+            return;
+        }
+
+        postApi('seek_locate', {
+            path: currentPath,
+            mode: 'seek',
+            tag_name: activeTag.name,
+            tag_id: currentTagId,
+            key: keyword
+        }, function(res) {
+            if (res && res.status === 'success') {
+                if (res.found && res.recno > 0) {
+                    document.getElementById('stEof').classList.remove('active');
+
+                    // C-Core ez_db_recno returns 1-based node sequence index on the active tag track
+                    const targetIdx = res.recno - 1;
+                    jumpToTargetRow(targetIdx);
+                } else {
+                    if (res.eof) {
+                        document.getElementById('stEof').classList.add('active');
+                        showToast('EOF Reached', `Seek reached EOF for [${keyword}] on Tag [${activeTag.name}].`, 'warning');
+                    } else {
+                        showToast('Not Found', `Seek Not Found: [${keyword}] (Tag: ${activeTag.name})`, 'info');
+                    }
+                }
+            } else {
+                showToast('Search Error', (res && res.message) ? res.message : 'Unknown server error', 'error');
+            }
+        });
+    }
+
+    function jumpToTargetRow(targetIdx) {
+        if (targetIdx < 0) targetIdx = 0;
+        if (targetIdx >= totalRecords) targetIdx = Math.max(0, totalRecords - 1);
+
+        // 1. Update selection state and status bar indicators
+        selectRowIndex(targetIdx);
+
+        // 2. Center the target row within viewport scroll area
+        const container = document.getElementById('gridContainer');
+        if (container) {
+            const viewportHeight = container.clientHeight || 500;
+            const targetY = Math.max(0, (targetIdx * kRowHeight) - (viewportHeight / 2) + (kRowHeight / 2));
+            container.scrollTop = targetY;
+        }
+
+        // 3. Ensure target buffer chunk is loaded and render the window
+        ensureRowBuffered(targetIdx);
+        renderVisibleWindow();
     }
 
     // =========================================================================
@@ -1573,11 +1682,9 @@ if (isset($_GET['api'])) {
         }
         activeTool = tool;
         
-        // Ensure bottom TOOLBOX toggle bar stays visible
         const tbBar = document.getElementById('toolboxBar');
         if (tbBar) tbBar.style.display = 'flex';
 
-        // Display main drawer and target sub-panel
         drawer.classList.add('open');
         drawer.style.display = 'flex';
         
@@ -1594,7 +1701,6 @@ if (isset($_GET['api'])) {
         if (tool === 'relation' && typeof initRelationUI === 'function') initRelationUI();
     }
 
-    // Dynamically render Menu -> Edit -> Slot [1] ~ [8] according to active tab EDX tags count
     function updateIndexSlotMenu() {
         const container = document.getElementById('menuIndexSlotContainer');
         if (!container) return;
@@ -1626,7 +1732,7 @@ if (isset($_GET['api'])) {
         const drawer = document.getElementById('toolchainDrawer');
         if (drawer) {
             drawer.classList.remove('open');
-            drawer.style.display = 'none'; // Clear inline style completely to ensure drawer hides smoothly
+            drawer.style.display = 'none';
         }
 
         const btnSchema = document.getElementById('btnSchemaToggle');
@@ -1634,7 +1740,6 @@ if (isset($_GET['api'])) {
         if (btnSchema) btnSchema.classList.remove('active');
         if (btnRel) btnRel.classList.remove('active');
 
-        // Hide child panels
         const pSchema = document.getElementById('panelSchema');
         const pRelation = document.getElementById('panelRelation');
         if (pSchema) pSchema.style.display = 'none';
@@ -1667,7 +1772,12 @@ if (isset($_GET['api'])) {
             document.getElementById('txtSchemaEbfPath').value = currentPath;
             document.getElementById('btnSaveSchemaText').innerText = 'Save EBF';
             if (currentFields.length > 0) {
-                currentFields.forEach(f => addSchemaFieldRow(f.name, f.type, f.len));
+                currentFields.forEach(f => {
+                    const fName = isObject(f) ? f.name : f;
+                    const fType = isObject(f) ? f.type : 'C';
+                    const fLen = isObject(f) ? f.len : 10;
+                    addSchemaFieldRow(fName, fType, fLen);
+                });
             } else {
                 addSchemaFieldRow('date', 'C', 10);
                 addSchemaFieldRow('code', 'C', 12);
@@ -1720,7 +1830,12 @@ if (isset($_GET['api'])) {
             if (res.status === 'success') {
                 const tbody = document.querySelector('#tblSchemaFields tbody');
                 tbody.innerHTML = '';
-                res.fields.forEach(f => addSchemaFieldRow(f.name, f.type, f.len));
+                res.fields.forEach(f => {
+                    const fName = isObject(f) ? f.name : f;
+                    const fType = isObject(f) ? f.type : 'C';
+                    const fLen = isObject(f) ? f.len : 10;
+                    addSchemaFieldRow(fName, fType, fLen);
+                });
             }
         });
     }
@@ -1785,7 +1900,6 @@ if (isset($_GET['api'])) {
                                 openFileExplorer(it.path, expCallback);
                             }
                         } else {
-                            // Ensure selected target is a valid .ebf file
                             if (!it.name.toLowerCase().endsWith('.ebf')) return;
 
                             document.querySelectorAll('.explorer-row').forEach(r => r.classList.remove('selected'));
@@ -1806,18 +1920,15 @@ if (isset($_GET['api'])) {
 
     function explorerUp() {
         const cur = document.getElementById('expCurrentPath').value.trim();
-        // Support both Windows backslashes and Unix slashes
         const lastSep = Math.max(cur.lastIndexOf('/'), cur.lastIndexOf('\\'));
 
         if (lastSep > 0) {
             let parent = cur.substring(0, lastSep);
-            // Handle Windows drive root special case (e.g. "C:" -> "C:\")
             if (parent.length === 2 && parent.charAt(1) === ':') {
                 parent += '\\';
             }
             openFileExplorer(parent, expCallback);
         } else if (lastSep === 0) {
-            // Unix root directory "/"
             openFileExplorer('/', expCallback);
         }
     }
@@ -1848,10 +1959,9 @@ if (isset($_GET['api'])) {
     }
 
     // =========================================================================
-    // 8. Global Keyboard Shortcuts Listener (Aligned with desktop_main_page)
+    // 8. Global Keyboard Shortcuts Listener
     // =========================================================================
     window.addEventListener('keydown', (e) => {
-        // Intercept all shortcuts except F5 reload when FFI is locked down
         if (!isFfiAvailable) {
             if (e.key !== 'F5' && !(e.ctrlKey && e.key.toLowerCase() === 'r')) {
                 e.preventDefault();
@@ -1861,7 +1971,7 @@ if (isset($_GET['api'])) {
         }
 
         if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'SELECT') return;
-        if (activeTool !== null) return; // Yield keyboard control while child panel is open
+        if (activeTool !== null) return;
 
         const viewportHeight = document.getElementById('gridContainer').clientHeight || 500;
         const pageSize = Math.max(1, Math.floor(viewportHeight / kRowHeight) - 1);
@@ -1930,7 +2040,6 @@ if (isset($_GET['api'])) {
         }
     });
 
-    // Toggle Menu item states and shortcuts based on active file status (Aligned with desktop_main_page)
     function updateCommandEnablement(hasActiveEbf) {
         document.querySelectorAll('.menu-requires-ebf').forEach(el => {
             el.classList.toggle('disabled', !hasActiveEbf);
@@ -1938,7 +2047,6 @@ if (isset($_GET['api'])) {
         updateIndexSlotMenu();
     }
 
-    // Defense guard: Prevent launching relation studio without active open tables
     const rawToggleDrawer = toggleDrawer;
     toggleDrawer = function(tool, isNew = false) {
         if (tool === 'relation' && (!currentPath || openedTabs.length === 0)) {
@@ -1950,8 +2058,19 @@ if (isset($_GET['api'])) {
 
     window.addEventListener('load', () => {
         console.log('ezDBUtility Workstation Initialized.');
-        updateCommandEnablement(false); // Initial state strictly locked down
+        updateCommandEnablement(false);
     });
+
+    const seekInputEl = document.getElementById('seekInput');
+    if (seekInputEl) {
+        seekInputEl.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' || e.key === 'F3') {
+                e.preventDefault();
+                e.stopPropagation();
+                executeSeek();
+            }
+        });
+    }
     </script>
 </body>
 </html>
