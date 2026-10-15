@@ -1,5 +1,0 @@
-C:\Users\user\work\ez_dbengine\ffi\cs\run_win\ez_stress_master.exe
-C:\Users\user\work\ez_dbengine\ffi\cs\run_win\ez_stress_master.dll
-C:\Users\user\work\ez_dbengine\ffi\cs\run_win\ez_stress_master.deps.json
-C:\Users\user\work\ez_dbengine\ffi\cs\run_win\ez_stress_master.runtimeconfig.json
-C:\Users\user\work\ez_dbengine\ffi\cs\run_win\ez_stress_master.pdb
