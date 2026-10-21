@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ezDBUtility
+Comment=Craftsman Precision Database Utility Engine
+Exec=/opt/ezdbutility/ezdbutility
+Icon=ezdbutility
+Terminal=false
+Type=Application
+Categories=Development;Database;
+StartupNotify=true

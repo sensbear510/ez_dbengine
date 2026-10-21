@@ -1,0 +1,9 @@
+Package: ezdbutility
+Version: 1.0.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: libgtk-3-0, zenity | kdialog, xdg-desktop-portal-gtk
+Maintainer: ezLink.io <support@ezlink.io>
+Description: ezDBUtility Workstation Desktop GUI
+ Advanced high-performance multi-platform database workstation and relation studio.

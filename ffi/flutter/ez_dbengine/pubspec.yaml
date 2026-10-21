@@ -1,0 +1,10 @@
+name: ez_dbengine
+description: High-performance C-based database engine wrapper for Dart and Flutter.
+version: 1.0.0
+publish_to: 'none'
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  ffi: 2.1.0
